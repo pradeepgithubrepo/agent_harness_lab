@@ -74,6 +74,35 @@ manifest.
 pytest
 ```
 
+## Stage 4: Microsoft Foundry connectivity
+
+Pass 1 adds one typed, reusable Foundry client for connectivity checks only. It
+does not select models, route requests, call MCP, or change LangGraph.
+
+Set these variables in the ignored `.env` file:
+
+```text
+FOUNDRY_ENDPOINT=https://your-foundry-resource.services.ai.azure.com/api/projects/your-project
+FOUNDRY_API_KEY=<API key>
+FOUNDRY_AUTH_MODE=api_key
+FOUNDRY_LIGHT_DEPLOYMENT=gpt-5-mini
+FOUNDRY_FRONTIER_DEPLOYMENT=gpt-5.4
+FOUNDRY_ROUTER_DEPLOYMENT=agent-router-managed
+```
+
+Run the independent deployment smoke test:
+
+```bash
+python scripts/test_foundry_deployments.py
+```
+
+The endpoint is the Foundry project endpoint; the client appends its required
+`/openai/v1` API path. The script calls all three deployments with a minimal
+JSON prompt and writes sanitised results to
+`artifacts/stage4_foundry_smoke_test.json`. A successful run reports a valid
+JSON response for each deployment. The API key is held as a `SecretStr`, is not
+logged or written to the artifact, and is never included in `.env.example`.
+
 ## MVP limitations and future extensions
 
 V1 uses a configurable character-to-token estimate, a deterministic

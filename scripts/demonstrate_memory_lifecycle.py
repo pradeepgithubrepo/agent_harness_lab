@@ -1,9 +1,11 @@
-"""Offline, sanitised lifecycle demonstration using injected store doubles."""
+"""Live, sanitised lifecycle demonstration across Redis, Cosmos, and Search."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from time import sleep
+from uuid import uuid4
 
 from agent_harness.memory import EpisodeMemory, MemoryCandidate, MemorySettings, SemanticMemory, WorkingMemory
 from agent_harness.memory.audit import MemoryAuditLog
@@ -17,40 +19,18 @@ from agent_harness.memory.tier_policy import episode_to_semantic, working_to_epi
 from agent_harness.memory.working_store import WorkingMemoryStore
 
 
-class FakeRedis:
-    def __init__(self) -> None: self.data, self.expires = {}, {}
-    def set(self, key, value, ex): self.data[key], self.expires[key] = value, ex
-    def get(self, key): return self.data.get(key)
-    def keys(self, pattern): return list(self.data)
-    def mget(self, keys): return [self.data.get(key) for key in keys]
-    def delete(self, key): self.data.pop(key, None)
-    def ttl(self, key): return self.expires.get(key, -2)
-
-
-class FakeContainer:
-    def __init__(self) -> None: self.items = {}
-    def create_item(self, body): self.items[body["id"]] = body
-    def read_item(self, item, partition_key): return self.items[item]
-    def replace_item(self, item, body): self.items[item] = body
-    def delete_item(self, item, partition_key): self.items.pop(item, None)
-    def query_items(self, **kwargs): return list(self.items.values())
-
-
-class FakeSearch:
-    def __init__(self) -> None: self.docs = []
-    def upload_documents(self, documents): self.docs.extend(documents)
-    def search(self, **kwargs): return self.docs
-
-
 def main() -> int:
     settings = MemorySettings()
-    working_store = WorkingMemoryStore(settings, FakeRedis())
-    episode_store = EpisodicMemoryStore(settings, FakeContainer())
-    semantic_store = SemanticMemoryStore(settings, FakeContainer())
-    semantic_search = SemanticSearch(settings, FakeSearch())
+    if not all(settings.connectivity_status().values()):
+        raise RuntimeError("Live memory-service configuration is incomplete.")
+    working_store = WorkingMemoryStore(settings)
+    episode_store = EpisodicMemoryStore(settings)
+    semantic_store = SemanticMemoryStore(settings)
+    semantic_search = SemanticSearch(settings)
     audit = MemoryAuditLog()
+    scope_id = f"stage6-demo-{uuid4()}"
 
-    working = WorkingMemory(scope_id="demo-scope", session_id="demo-session", task_id="demo-task",
+    working = WorkingMemory(scope_id=scope_id, session_id="demo-session", task_id="demo-task",
         source="demo", objective="Diagnose a synthetic job failure",
         workflow_state_projection={"incident_id": "incident-001", "step": "investigate"},
         evidence_references=["incident-001"], next_proposed_action="retrieve job status")
@@ -75,10 +55,12 @@ def main() -> int:
     semantic_search.index(fact)
     audit.record(MemoryAuditEvent(memory_id=fact.memory_id, scope_id=fact.scope_id,
         event_type="movement", tier="episodic", decision=promotion, reason_code=promotion.reason_code))
-    search_results = semantic_search.retrieve(working.scope_id, "job timeout")
+    search_results = _wait_for_search(semantic_search, working.scope_id, "job timeout")
 
-    newer_fact = fact.model_copy(update={"memory_id": "semantic-newer", "fact": "A first synthetic job-status timeout is retryable once.", "version": 2})
+    newer_fact = fact.model_copy(update={"memory_id": str(uuid4()), "fact": "A first synthetic job-status timeout is retryable once.", "version": 2})
     semantic_store.supersede(fact, newer_fact)
+    semantic_search.index(fact.model_copy(update={"status": "superseded", "superseded_by": newer_fact.memory_id}))
+    semantic_search.index(newer_fact)
     audit.record(MemoryAuditEvent(memory_id=fact.memory_id, scope_id=fact.scope_id,
         event_type="superseded", tier="semantic", reason_code="newer_validated_fact"))
     eviction = working_eviction(working, True)
@@ -92,12 +74,33 @@ def main() -> int:
     Path("artifacts/stage6_memory_demo.json").write_text(json.dumps({
         "working_memory_created": working.model_dump(mode="json"), "remaining_ttl_seconds": 7200,
         "episode": episode.model_dump(mode="json"), "promotion": promotion.model_dump(mode="json"),
-        "semantic_search_result_count": len(search_results), "superseded_by": newer_fact.memory_id,
+        "semantic_search_results": _safe_search_results(search_results), "superseded_by": newer_fact.memory_id,
         "eviction": eviction.model_dump(mode="json"), "context_package": package.model_dump(mode="json"),
         "audit_events": [event.model_dump(mode="json") for event in audit.events],
     }, indent=2) + "\n")
     print("Memory lifecycle demonstration: PASSED")
+    print(f"Working memory ID: {working.memory_id}")
+    print(f"Episode ID: {episode.memory_id}")
+    print(f"Semantic memory ID: {fact.memory_id}")
+    print(f"Superseding semantic memory ID: {newer_fact.memory_id}")
+    print(f"Search results: {len(search_results)}")
     return 0
+
+
+def _wait_for_search(search: SemanticSearch, scope_id: str, query: str) -> list[dict]:
+    for _ in range(5):
+        results = search.retrieve(scope_id, query)
+        if results:
+            return results
+        sleep(2)
+    return []
+
+
+def _safe_search_results(results: list[dict]) -> list[dict]:
+    return [
+        {key: result.get(key) for key in ("id", "subject", "fact", "status") if key in result}
+        for result in results
+    ]
 
 
 if __name__ == "__main__":

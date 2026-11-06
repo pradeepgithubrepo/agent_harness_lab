@@ -1,0 +1,52 @@
+trigger:
+  paths:
+    include:
+      - evaluation/**
+      - scripts/run_trajectory_evals.py
+      - src/agent_harness/incident_agent/**
+      - tests/test_trajectory_grader.py
+      - pyproject.toml
+      - azure-pipelines-stage7-evals.yml
+
+pr:
+  paths:
+    include:
+      - evaluation/**
+      - scripts/run_trajectory_evals.py
+      - src/agent_harness/incident_agent/**
+      - tests/test_trajectory_grader.py
+      - pyproject.toml
+      - azure-pipelines-stage7-evals.yml
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.11'
+
+  - script: |
+      python -m pip install --upgrade pip
+      python -m pip install -e ".[dev]"
+    displayName: Install dependencies
+
+  - script: |
+      python -m ruff check evaluation scripts/run_trajectory_evals.py tests/test_trajectory_grader.py src/agent_harness/incident_agent
+    displayName: Run lint
+
+  - script: |
+      python -m pytest
+    displayName: Run unit tests
+
+  - script: |
+      mkdir -p artifacts
+      python scripts/run_trajectory_evals.py
+    displayName: Run trajectory evaluations
+
+  - task: PublishPipelineArtifact@1
+    condition: always()
+    inputs:
+      targetPath: artifacts
+      artifact: stage7-trajectory-evals
+      publishLocation: pipeline
